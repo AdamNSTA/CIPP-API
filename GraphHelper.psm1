@@ -63,7 +63,7 @@ function New-GraphGetRequest ($uri, $tenantid, $scope, $AsApp) {
     Write-Verbose "Using $($uri) as url"
     $nextURL = $uri
     #not a fan of this, have to reconsider and change. Seperate function?
-    if ($tenantid -in $tenantlist.defaultdomainname -or $uri -like "https://graph.microsoft.com/beta/contracts?`$top=999" -or $uri -like "*/customers/*") {
+    if ($tenantid -in $uri -like "https://graph.microsoft.com/beta/contracts?`$top=999" -or $uri -like "*/customers/*") {
         $ReturnedData = do {
             try {
                 $Data = (Invoke-RestMethod -Uri $nextURL -Method GET -Headers $headers -ContentType "application/json; charset=utf-8")
@@ -96,7 +96,7 @@ function New-GraphPOSTRequest ($uri, $tenantid, $body, $type, $scope, $AsApp) {
         $type = 'POST'
     }
     #not a fan of this, have to reconsider and change. Seperate function?
-    if ($tenantid -in $tenantlist.defaultdomainname -or $uri -like "*/contracts*" -or $uri -like "*/customers/*") {
+    if ($tenantid -in $uri -like "*/contracts*" -or $uri -like "*/customers/*") {
         try {
             $ReturnedData = (Invoke-RestMethod -Uri $($uri) -Method $TYPE -Body $body -Headers $headers -ContentType "application/json; charset=utf-8")
         }
