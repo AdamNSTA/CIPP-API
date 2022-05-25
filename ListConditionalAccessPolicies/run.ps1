@@ -21,7 +21,7 @@ function Get-LocationNameFromId {
     }
     $DisplayName = $Locations | Where-Object { $_.id -eq $ID } | Select-Object -ExpandProperty DisplayName
     if ([string]::IsNullOrEmpty($displayName)) {
-        return ""
+        return  $ID
     }
     else {
         return $DisplayName
@@ -42,7 +42,7 @@ function Get-RoleNameFromId {
     }
     $DisplayName = $RoleDefinitions | Where-Object { $_.id -eq $ID } | Select-Object -ExpandProperty DisplayName
     if ([string]::IsNullOrEmpty($displayName)) {
-        return ""
+        return $ID
     }
     else {
         return $DisplayName
@@ -63,7 +63,7 @@ function Get-UserNameFromId {
     }
     $DisplayName = $Users | Where-Object { $_.id -eq $ID } | Select-Object -ExpandProperty DisplayName
     if ([string]::IsNullOrEmpty($displayName)) {
-        return ""
+        return $ID
     }
     else {
         return $DisplayName
@@ -432,6 +432,7 @@ try {
             builtInControls                             = ($cap.grantControls.builtInControls) -join ","
             customAuthenticationFactors                 = ($cap.grantControls.customAuthenticationFactors) -join ","
             termsOfUse                                  = ($cap.grantControls.termsOfUse) -join ","
+            rawjson                                     = ($cap | ConvertTo-Json -Depth 100)
         }
         $temp
     }

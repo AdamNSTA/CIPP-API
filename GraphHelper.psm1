@@ -60,7 +60,7 @@ function Log-Request ($message, $tenant, $API, $user, $sev) {
         Write-Information 'Not writing to log file - Debug mode is not enabled.'
         return
     }
-    $CleanMessage = [string]::join(' ', ($message.Split("`n")))
+    $CleanMessage = [string]::join(' ', ($message.Split("`n"))) -replace '[|]', ':'
     $logdata = "$($date)|$($tenant)|$($API)|$($CleanMessage)|$($username)|$($sev)"
     if ($LogMutex.WaitOne(1000)) {
         $logdata | Out-File -Append -FilePath "Logs\$((Get-Date).ToString('ddMMyyyy')).log" -Force
@@ -334,7 +334,8 @@ function New-ExoRequest ($tenantid, $cmdlet, $cmdParams) {
             $ReturnedData = Invoke-RestMethod "https://outlook.office365.com/adminapi/beta/$($tenant)/InvokeCommand" -Method POST -Body $ExoBody -Headers $Headers -ContentType 'application/json; charset=utf-8'
         }
         catch {
-            $Message = ($_.ErrorDetails | ConvertFrom-Json -ErrorAction SilentlyContinue).error.details.message
+            $ReportedError = ($_.ErrorDetails | ConvertFrom-Json -ErrorAction SilentlyContinue)
+            $Message = if ($ReportedError.error.details.message) { $ReportedError.error.details.message } else { $ReportedError.error.innererror.internalException.message }
             if ($Message -eq $null) { $Message = $($_.Exception.Message) }
             throw $Message
         }
