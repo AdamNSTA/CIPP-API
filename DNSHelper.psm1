@@ -29,14 +29,26 @@ function Resolve-DnsHttpsQuery {
         [string]$RecordType = 'A'
     )
 
-    if (Test-Path -Path 'Config\DnsConfig.json') {
-        try {
-            $Config = Get-Content 'Config\DnsConfig.json' | ConvertFrom-Json 
+    try {
+        $ConfigTable = Get-CippTable -tablename Config
+        $Filter = "PartitionKey eq 'Domains' and RowKey eq 'Domains'"
+        $Config = Get-AzDataTableEntity @ConfigTable -Filter $Filter
+
+        $ValidResolvers = @('Google', 'CloudFlare', 'Quad9')
+        if ($ValidResolvers -contains $Config.Resolver) {
             $Resolver = $Config.Resolver
         }
-        catch { $Resolver = 'Google' }
+        else {
+            $Resolver = 'Google'
+            $Config = @{
+                PartitionKey = 'Domains'
+                RowKey       = 'Domains'
+                Resolver     = $Resolver
+            }
+            Add-AzDataTableEntity @ConfigTable -Entity $Config -Force
+        }
     }
-    else {
+    catch {
         $Resolver = 'Google'
     }
 
@@ -61,40 +73,15 @@ function Resolve-DnsHttpsQuery {
 
     $Uri = $QueryTemplate -f $BaseUri, $Domain, $RecordType
 
-    Write-Verbose "### $Uri ###"
- 
-    $Retry = 0
-    $DataReturned = $false
-    while (!$DataReturned) {
-        try {
-            $Results = Invoke-RestMethod -Uri $Uri -Headers $Headers -ErrorAction Stop
-        }
-        catch {
-            Write-Verbose "$Resolver DoH Query Exception - $($_.Exception.Message)" 
-        }
+    $Results = Invoke-RestMethod -Uri $Uri -Headers $Headers -ErrorAction Stop
     
-        if ($Resolver -eq 'Cloudflare' -or $Resolver -eq 'Quad9' -and $RecordType -eq 'txt' -and $Results.Answer) {
-            $Results.Answer | ForEach-Object {
-                $_.data = $_.data -replace '"' -replace '\s+', ' '
-            }
+    if ($Resolver -eq 'Cloudflare' -or $Resolver -eq 'Quad9' -and $RecordType -eq 'txt' -and $Results.Answer) {
+        $Results.Answer | ForEach-Object {
+            $_.data = $_.data -replace '"' -replace '\s+', ' '
         }
-
-        if ($Results.Answer) {
-            $DataReturned = $true
-        }
-        elseif ($Results.Status -ne 0) {
-            $DataReturned = $true
-        }
-        else {
-            if ($Retry -gt 3) {
-                $DataReturned = $true
-            }
-            $Retry++
-            Start-Sleep -Milliseconds 50
-        }
+        $Results.Answer = $Results.Answer | Where-Object { $_.type -eq 16 } 
     }
     
-    Write-Verbose ($Results | ConvertTo-Json)
     return $Results
 }
 
@@ -138,7 +125,7 @@ function Test-DNSSEC {
         Domain     = $Domain
     }
 
-    $Result = Resolve-DnsHttpsQuery @DnsQuery
+    $Result = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
     if ($Result.Status -eq 2 -and $Result.AD -eq $false) {
         $ValidationFails.Add('DNSSEC Validation failed.') | Out-Null
     }
@@ -210,7 +197,7 @@ function Read-NSRecord {
     $NSResults.Domain = $Domain
 
     try {
-        $Result = Resolve-DnsHttpsQuery @DnsQuery
+        $Result = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
     }
     catch { $Result = $null }
     if ($Result.Status -eq 2 -and $Result.AD -eq $false) {
@@ -281,7 +268,7 @@ function Read-MXRecord {
     $MXResults.Domain = $Domain
 
     try {
-        $Result = Resolve-DnsHttpsQuery @DnsQuery
+        $Result = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
     }
     catch { $Result = $null }
     if ($Result.Status -eq 2 -and $Result.AD -eq $false) {
@@ -463,7 +450,7 @@ function Read-SpfRecord {
                     # don't perform lookup if domain is not specified
                 }
                 else {
-                    $Query = Resolve-DnsHttpsQuery @DnsQuery
+                    $Query = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
                     if ($Query.Status -eq 2 -and $Query.AD -eq $false) {
                         $ValidationFails.Add('DNSSEC validation failed.') | Out-Null
                     }
@@ -620,14 +607,14 @@ function Read-SpfRecord {
                             try {
                                 $TypeQuery = @{ Domain = $TypeDomain; RecordType = $Matches.RecordType }
                                 Write-Verbose "Looking up $($TypeQuery.Domain)"
-                                $TypeResult = Resolve-DnsHttpsQuery @TypeQuery
+                                $TypeResult = Resolve-DnsHttpsQuery @TypeQuery -ErrorAction Stop
                                 
                                 if ($Matches.RecordType -eq 'mx') {
                                     $MxCount = 0
                                     foreach ($mx in $TypeResult.Answer.data) {
                                         $MxCount++
                                         $Preference, $MxDomain = $mx -replace '\.$' -split '\s+'                                        
-                                        $MxQuery = Resolve-DnsHttpsQuery -Domain $MxDomain
+                                        $MxQuery = Resolve-DnsHttpsQuery -Domain $MxDomain -ErrorAction Stop
                                         $MxIps = $MxQuery.Answer.data
 
                                         foreach ($MxIp in $MxIps) {
@@ -754,7 +741,7 @@ function Read-SpfRecord {
 
     if ($Domain -ne 'Not Specified') {
         # Check legacy SPF type
-        $LegacySpfType = Resolve-DnsHttpsQuery -Domain $Domain -RecordType 'SPF'
+        $LegacySpfType = Resolve-DnsHttpsQuery -Domain $Domain -RecordType 'SPF' -ErrorAction Stop
         if ($null -ne $LegacySpfType -and $LegacySpfType -eq 0) {
             $ValidationWarns.Add("The record type 'SPF' was detected, this is legacy and should not be used. It is recommeded to delete this record (RFC 7208 Section 14.1).") | Out-Null
         }
@@ -938,7 +925,7 @@ function Read-DmarcPolicy {
     
     # Resolve DMARC record
 
-    $Query = Resolve-DnsHttpsQuery @DnsQuery
+    $Query = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
 
     $RecordCount = 0
     $Query.Answer | Where-Object { $_.data -match '^v=DMARC1' } | ForEach-Object {
@@ -1060,7 +1047,7 @@ function Read-DmarcPolicy {
             foreach ($ReportDomain in $ReportDomains) {
                 $ReportDomainQuery = "$Domain._report._dmarc.$ReportDomain"
                 $DnsQuery['Domain'] = $ReportDomainQuery
-                $ReportDmarcQuery = Resolve-DnsHttpsQuery @DnsQuery
+                $ReportDmarcQuery = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
                 $ReportDmarcRecord = $ReportDmarcQuery.Answer.data
                 if ($null -eq $ReportDmarcQuery -or $ReportDmarcQuery.Status -ne 0) {
                     $ValidationWarns.Add("Report DMARC policy for $Domain is missing from $ReportDomain, reports will not be delivered. Expected record: '$Domain._report._dmarc.$ReportDomain' - Expected value: 'v=DMARC1;'") | Out-Null
@@ -1105,11 +1092,14 @@ function Read-DmarcPolicy {
         if ($ForensicCount -eq 0 -and $DmarcAnalysis.FailureReport -ne '') { $ValidationWarns.Add('Forensic email reports recipients are not defined and failure report options are set. No reports will be sent. This is not an issue unless you are expecting forensic reports.') | Out-Null }
         if ($DmarcAnalysis.FailureReport -eq '' -and $null -ne $DmarcRecord) { $DmarcAnalysis.FailureReport = '0' }
         if ($ForensicCount -gt 0) {
-            if ($FailureReportValues -notcontains $DmarcAnalysis.FailureReport) { $ValidationFails.Add('Failure reporting options must be 0, 1, d or s.') | Out-Null }
-            if ($DmarcAnalysis.FailureReport -eq '1') { $ValidationPasses.Add('Failure report option 1 generates forensic reports on SPF or DKIM misalignment.') | Out-Null }
-            if ($DmarcAnalysis.FailureReport -eq '0') { $ValidationWarns.Add('Failure report option 0 will only generate a forensic report on both SPF and DKIM misalignment. It is recommended to set this value to 1.') | Out-Null }
-            if ($DmarcAnalysis.FailureReport -eq 'd') { $ValidationWarns.Add('Failure report option d will only generate a forensic report on failed DKIM evaluation. It is recommended to set this value to 1.') | Out-Null }
-            if ($DmarcAnalysis.FailureReport -eq 's') { $ValidationWarns.Add('Failure report option s will only generate a forensic report on failed SPF evaluation. It is recommended to set this value to 1.') | Out-Null }
+            $ReportOptions = $DmarcAnalysis.FailureReport -split ':'
+            foreach ($ReportOption in $ReportOptions) {
+                if ($FailureReportValues -notcontains $ReportOption) { $ValidationFails.Add("Failure report option '$ReportOption' is not a valid choice.") | Out-Null }
+                if ($ReportOption -eq '1') { $ValidationPasses.Add('Failure report option 1 generates forensic reports on SPF or DKIM misalignment.') | Out-Null }
+                if ($ReportOption -eq '0' -and $ReportOptions -notcontains '1') { $ValidationWarns.Add('Failure report option 0 will only generate a forensic report on both SPF and DKIM misalignment. It is recommended to set this value to 1.') | Out-Null }
+                if ($ReportOption -eq 'd' -and $ReportOptions -notcontains '1') { $ValidationWarns.Add('Failure report option d will only generate a forensic report on failed DKIM evaluation. It is recommended to set this value to 1.') | Out-Null }
+                if ($ReportOption -eq 's' -and $ReportOptions -notcontains '1') { $ValidationWarns.Add('Failure report option s will only generate a forensic report on failed SPF evaluation. It is recommended to set this value to 1.') | Out-Null }
+            }
         }
     }
 
@@ -1174,7 +1164,10 @@ function Read-DkimRecord {
     try {
         $MXRecord = Read-MXRecord -Domain $Domain
         foreach ($Selector in $MXRecord.Selectors) {
-            $Selectors.Add($Selector) | Out-Null
+            try {
+                $Selectors.Add($Selector) | Out-Null
+            }
+            catch {}
         }
         $DkimAnalysis.MailProvider = $MXRecord.MailProvider
         if ($MXRecord.MailProvider.PSObject.Properties.Name -contains 'MinimumSelectorPass') {
@@ -1189,157 +1182,164 @@ function Read-DkimRecord {
     
     if (($Selectors | Measure-Object | Select-Object -ExpandProperty Count) -gt 0) {
         foreach ($Selector in $Selectors) {
-            # Initialize object
-            $DkimRecord = [PSCustomObject]@{
-                Selector         = ''
-                Record           = ''
-                Version          = ''
-                PublicKey        = ''
-                PublicKeyInfo    = ''
-                KeyType          = ''
-                Flags            = ''
-                Notes            = ''
-                HashAlgorithms   = ''
-                ServiceType      = ''
-                Granularity      = ''
-                UnrecognizedTags = [System.Collections.Generic.List[object]]::new()
-            }
+            if (![string]::IsNullOrEmpty($Selector)) {
+                # Initialize object
+                $DkimRecord = [PSCustomObject]@{
+                    Selector         = ''
+                    Record           = ''
+                    Version          = ''
+                    PublicKey        = ''
+                    PublicKeyInfo    = ''
+                    KeyType          = ''
+                    Flags            = ''
+                    Notes            = ''
+                    HashAlgorithms   = ''
+                    ServiceType      = ''
+                    Granularity      = ''
+                    UnrecognizedTags = [System.Collections.Generic.List[object]]::new()
+                }
 
-            $DnsQuery = @{
-                RecordType = 'TXT'
-                Domain     = "$Selector._domainkey.$Domain"
-            }
+                $DnsQuery = @{
+                    RecordType = 'TXT'
+                    Domain     = "$Selector._domainkey.$Domain"
+                }
 
-            $QueryResults = Resolve-DnsHttpsQuery @DnsQuery
-
-            if ([string]::IsNullOrEmpty($Selector)) { continue }
+                try {
+                    $QueryResults = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
+                }
+                catch { 
+                    $Message = "{0}`r`n{1}" -f $_.Exception.Message, ($DnsQuery | ConvertTo-Json)
+                    throw $Message
+                }
+                if ([string]::IsNullOrEmpty($Selector)) { continue }
             
-            if ($QueryResults.Status -eq 2 -and $QueryResults.AD -eq $false) {
-                $ValidationFails.Add('DNSSEC validation failed.') | Out-Null
-            }
-            if ($QueryResults -eq '' -or $QueryResults.Status -ne 0) {
-                if ($QueryResults.Status -eq 3) {
-                    if ($MinimumSelectorPass -eq 0) {
-                        $ValidationFails.Add("$Selector - The selector record does not exist for this domain.") | Out-Null
+                if ($QueryResults.Status -eq 2 -and $QueryResults.AD -eq $false) {
+                    $ValidationFails.Add('DNSSEC validation failed.') | Out-Null
+                }
+                if ($QueryResults -eq '' -or $QueryResults.Status -ne 0) {
+                    if ($QueryResults.Status -eq 3) {
+                        if ($MinimumSelectorPass -eq 0) {
+                            $ValidationFails.Add("$Selector - The selector record does not exist for this domain.") | Out-Null
+                        }
                     }
+                    else {
+                        $ValidationFails.Add("$Selector - DKIM record is missing, check the selector and try again") | Out-Null
+                    }
+                    $Record = ''
                 }
                 else {
-                    $ValidationFails.Add("$Selector - DKIM record is missing, check the selector and try again") | Out-Null
-                }
-                $Record = ''
-            }
-            else {
-                $QueryData = ($QueryResults.Answer).data | Where-Object { $_ -match '(v=|k=|t=|p=)' }
-                if (( $QueryData | Measure-Object).Count -gt 1) {
-                    $Record = $QueryData[-1]
-                }
-                else {
-                    $Record = $QueryData
-                }
-            }
-            $DkimRecord.Selector = $Selector
-
-            if ($null -eq $Record) { $Record = '' }
-            $DkimRecord.Record = $Record
-
-            # Split DKIM record into name/value pairs
-            $TagList = [System.Collections.Generic.List[object]]::new()
-            Foreach ($Element in ($Record -split ';')) {
-                if ($Element -ne '') {
-                    $Name, $Value = $Element.trim() -split '='
-                    $TagList.Add(
-                        [PSCustomObject]@{
-                            Name  = $Name
-                            Value = $Value
-                        }
-                    ) | Out-Null
-                }
-            }
-            
-            # Loop through name/value pairs and set object properties
-            $x = 0
-            foreach ($Tag in $TagList) { 
-                if ($x -eq 0 -and $Tag.Value -ne 'DKIM1') { $ValidationFails.Add("$Selector - The record must being with 'v=DKIM1'.") | Out-Null }
-            
-                switch ($Tag.Name) {
-                    'v' {
-                        # REQUIRED: Version
-                        if ($x -ne 0) { $ValidationFails.Add("$Selector - The record must being with 'v=DKIM1'.") | Out-Null }
-                        $DkimRecord.Version = $Tag.Value
+                    $QueryData = ($QueryResults.Answer).data | Where-Object { $_ -match '(v=|k=|t=|p=)' }
+                    if (( $QueryData | Measure-Object).Count -gt 1) {
+                        $Record = $QueryData[-1]
                     }
-                    'p' {
-                        # REQUIRED: Public Key
-                        if ($Tag.Value -ne '') {
-                            $DkimRecord.PublicKey = "-----BEGIN PUBLIC KEY-----`n {0}`n-----END PUBLIC KEY-----" -f $Tag.Value
-                            $DkimRecord.PublicKeyInfo = Get-RsaPublicKeyInfo -EncodedString $Tag.Value
+                    else {
+                        $Record = $QueryData
+                    }
+                }
+                $DkimRecord.Selector = $Selector
+
+                if ($null -eq $Record) { $Record = '' }
+                $DkimRecord.Record = $Record
+
+                # Split DKIM record into name/value pairs
+                $TagList = [System.Collections.Generic.List[object]]::new()
+                Foreach ($Element in ($Record -split ';')) {
+                    if ($Element -ne '') {
+                        $Name, $Value = $Element.trim() -split '='
+                        $TagList.Add(
+                            [PSCustomObject]@{
+                                Name  = $Name
+                                Value = $Value
+                            }
+                        ) | Out-Null
+                    }
+                }
+            
+                # Loop through name/value pairs and set object properties
+                $x = 0
+                foreach ($Tag in $TagList) { 
+                    if ($x -eq 0 -and $Tag.Value -ne 'DKIM1') { $ValidationFails.Add("$Selector - The record must being with 'v=DKIM1'.") | Out-Null }
+            
+                    switch ($Tag.Name) {
+                        'v' {
+                            # REQUIRED: Version
+                            if ($x -ne 0) { $ValidationFails.Add("$Selector - The record must being with 'v=DKIM1'.") | Out-Null }
+                            $DkimRecord.Version = $Tag.Value
                         }
-                        else {
-                            if ($MXRecord.MailProvider.Name -eq 'Null') {
-                                $ValidationPasses.Add("$Selector - DKIM configuration is valid for a Null MX record configuration.") | Out-Null
+                        'p' {
+                            # REQUIRED: Public Key
+                            if ($Tag.Value -ne '') {
+                                $DkimRecord.PublicKey = "-----BEGIN PUBLIC KEY-----`n {0}`n-----END PUBLIC KEY-----" -f $Tag.Value
+                                $DkimRecord.PublicKeyInfo = Get-RsaPublicKeyInfo -EncodedString $Tag.Value
                             }
                             else {
-                                $ValidationFails.Add("$Selector - There is no public key specified for this DKIM record or the key is revoked.") | Out-Null 
+                                if ($MXRecord.MailProvider.Name -eq 'Null') {
+                                    $ValidationPasses.Add("$Selector - DKIM configuration is valid for a Null MX record configuration.") | Out-Null
+                                }
+                                else {
+                                    $ValidationFails.Add("$Selector - There is no public key specified for this DKIM record or the key is revoked.") | Out-Null 
+                                }
                             }
                         }
+                        'k' {
+                            $DkimRecord.KeyType = $Tag.Value
+                        }
+                        't' {
+                            $DkimRecord.Flags = $Tag.Value
+                        }
+                        'n' {
+                            $DkimRecord.Notes = $Tag.Value
+                        }
+                        'h' {
+                            $DkimRecord.HashAlgorithms = $Tag.Value
+                        }
+                        's' {
+                            $DkimRecord.ServiceType = $Tag.Value
+                        }
+                        'g' {
+                            $DkimRecord.Granularity = $Tag.Value
+                        }
+                        default {
+                            $DkimRecord.UnrecognizedTags.Add($Tag) | Out-Null
+                        }
                     }
-                    'k' {
-                        $DkimRecord.KeyType = $Tag.Value
-                    }
-                    't' {
-                        $DkimRecord.Flags = $Tag.Value
-                    }
-                    'n' {
-                        $DkimRecord.Notes = $Tag.Value
-                    }
-                    'h' {
-                        $DkimRecord.HashAlgorithms = $Tag.Value
-                    }
-                    's' {
-                        $DkimRecord.ServiceType = $Tag.Value
-                    }
-                    'g' {
-                        $DkimRecord.Granularity = $Tag.Value
-                    }
-                    default {
-                        $DkimRecord.UnrecognizedTags.Add($Tag) | Out-Null
-                    }
-                }
-                $x++
-            }
-
-            if ($Record -ne '') {
-                if ($DkimRecord.KeyType -eq '') { $DkimRecord.KeyType = 'rsa' }
-
-                if ($DkimRecord.HashAlgorithms -eq '') { $DkimRecord.HashAlgorithms = 'all' }
-
-                $UnrecognizedTagCount = $UnrecognizedTags | Measure-Object | Select-Object -ExpandProperty Count
-                if ($UnrecognizedTagCount -gt 0) {
-                    $TagString = ($UnrecognizedTags | ForEach-Object { '{0}={1}' -f $_.Tag, $_.Value }) -join ', '
-                    $ValidationWarns.Add("$Selector - $UnrecognizedTagCount urecognized tag(s) were detected in the DKIM record. This can cause issues with some mailbox providers. Tags: $TagString")
-                }
-                if ($DkimRecord.Flags -eq 'y') {
-                    $ValidationWarns.Add("$Selector - The flag 't=y' indicates that this domain is testing mode currently. If DKIM is fully deployed, this flag should be changed to t=s unless subdomaining is required.") | Out-Null
+                    $x++
                 }
 
-                if ($DkimRecord.PublicKeyInfo.SignatureAlgorithm -ne $DkimRecord.KeyType -and $MXRecord.MailProvider.Name -ne 'Null') {
-                    $ValidationWarns.Add("$Selector - Key signature algorithm $($DkimRecord.PublicKeyInfo.SignatureAlgorithm) does not match $($DkimRecord.KeyType)") | Out-Null
-                }
+                if ($Record -ne '') {
+                    if ($DkimRecord.KeyType -eq '') { $DkimRecord.KeyType = 'rsa' }
 
-                if ($DkimRecord.PublicKeyInfo.KeySize -lt 1024 -and $MXRecord.MailProvider.Name -ne 'Null') {
-                    $ValidationFails.Add("$Selector - Key size is less than 1024 bit, found $($DkimRecord.PublicKeyInfo.KeySize).") | Out-Null
-                }
-                else {
-                    if ($MXRecord.MailProvider.Name -ne 'Null') {
-                        $ValidationPasses.Add("$Selector - DKIM key validation succeeded.") | Out-Null
+                    if ($DkimRecord.HashAlgorithms -eq '') { $DkimRecord.HashAlgorithms = 'all' }
+
+                    $UnrecognizedTagCount = $UnrecognizedTags | Measure-Object | Select-Object -ExpandProperty Count
+                    if ($UnrecognizedTagCount -gt 0) {
+                        $TagString = ($UnrecognizedTags | ForEach-Object { '{0}={1}' -f $_.Tag, $_.Value }) -join ', '
+                        $ValidationWarns.Add("$Selector - $UnrecognizedTagCount urecognized tag(s) were detected in the DKIM record. This can cause issues with some mailbox providers. Tags: $TagString")
                     }
-                    $SelectorPasses++
-                }
+                    if ($DkimRecord.Flags -eq 'y') {
+                        $ValidationWarns.Add("$Selector - The flag 't=y' indicates that this domain is testing mode currently. If DKIM is fully deployed, this flag should be changed to t=s unless subdomaining is required.") | Out-Null
+                    }
 
-                if (($ValidationFails | Measure-Object | Select-Object -ExpandProperty Count) -eq 0) {
-                    $ValidationPasses.Add("$Selector - No errors detected with DKIM record.") | Out-Null
-                }
-            }    
+                    if ($DkimRecord.PublicKeyInfo.SignatureAlgorithm -ne $DkimRecord.KeyType -and $MXRecord.MailProvider.Name -ne 'Null') {
+                        $ValidationWarns.Add("$Selector - Key signature algorithm $($DkimRecord.PublicKeyInfo.SignatureAlgorithm) does not match $($DkimRecord.KeyType)") | Out-Null
+                    }
+
+                    if ($DkimRecord.PublicKeyInfo.KeySize -lt 1024 -and $MXRecord.MailProvider.Name -ne 'Null') {
+                        $ValidationFails.Add("$Selector - Key size is less than 1024 bit, found $($DkimRecord.PublicKeyInfo.KeySize).") | Out-Null
+                    }
+                    else {
+                        if ($MXRecord.MailProvider.Name -ne 'Null') {
+                            $ValidationPasses.Add("$Selector - DKIM key validation succeeded.") | Out-Null
+                        }
+                        $SelectorPasses++
+                    }
+
+                    if (($ValidationFails | Measure-Object | Select-Object -ExpandProperty Count) -eq 0) {
+                        $ValidationPasses.Add("$Selector - No errors detected with DKIM record.") | Out-Null
+                    }
+                }    
             ($DkimAnalysis.Records).Add($DkimRecord) | Out-Null
+            }
         }
     }
     if (($DkimAnalysis.Records | Measure-Object | Select-Object -ExpandProperty Count) -eq 0 -and [string]::IsNullOrEmpty($DkimAnalysis.Selectors)) {
@@ -1684,9 +1684,12 @@ namespace SevenTiny.Bantina.Security {
     }
 }
 '@
-    if (!('SevenTiny.Bantina.Security.RSACommon' -as [type])) {
-        Add-Type -TypeDefinition $source -Language CSharp
+    try {
+        if (!('SevenTiny.Bantina.Security.RSACommon' -as [type])) {
+            Add-Type -TypeDefinition $source -Language CSharp
+        }
     }
+    catch {}
 
     # Return RSA Public Key information
     [SevenTiny.Bantina.Security.RSACommon]::CreateRsaProviderFromPublicKey($EncodedString)
@@ -1918,9 +1921,12 @@ namespace CyberDrain.CIPP {
     }
 }
 '@
-    if (!('CyberDrain.CIPP.CertificateCheck' -as [type])) {
-        Add-Type -TypeDefinition $source -Language CSharp
+    try { 
+        if (!('CyberDrain.CIPP.CertificateCheck' -as [type])) {
+            Add-Type -TypeDefinition $source -Language CSharp
+        }
     }
+    catch {}
 
     [CyberDrain.CIPP.CertificateCheck]::GetServerCertificate($Url, $FollowRedirect)
 }
@@ -2033,7 +2039,7 @@ function Read-MtaStsRecord {
     
     # Resolve DMARC record
 
-    $Query = Resolve-DnsHttpsQuery @DnsQuery
+    $Query = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
 
     $RecordCount = 0
     $Query.Answer | Where-Object { $_.data -match '^v=STSv1' } | ForEach-Object {
@@ -2295,7 +2301,7 @@ function Read-TlsRptRecord {
     
     # Resolve DMARC record
 
-    $Query = Resolve-DnsHttpsQuery @DnsQuery
+    $Query = Resolve-DnsHttpsQuery @DnsQuery -ErrorAction Stop
 
     $RecordCount = 0
     $Query.Answer | Where-Object { $_.data -match '^v=TLSRPTv1' } | ForEach-Object {

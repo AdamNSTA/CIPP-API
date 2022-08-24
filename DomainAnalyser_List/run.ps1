@@ -4,7 +4,7 @@ using namespace System.Net
 param($Request, $TriggerMetadata)
 
 $APIName = $TriggerMetadata.FunctionName
-Log-Request -user $request.headers.'x-ms-client-principal' -API $APINAME -message 'Accessed this API' -Sev 'Debug'
+Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME -message 'Accessed this API' -Sev 'Debug'
 
 # Write to the Azure Functions log stream.
 Write-Host 'PowerShell HTTP trigger function processed a request.'
@@ -20,33 +20,70 @@ if (Test-Path .\Cache_DomainAnalyser) {
     foreach ($Result in $UnfilteredResults) { 
         $Object = $Result | ConvertFrom-Json
 
-        $ExistingDomain = @{
+        <#$MigratePartitionKey = @{
             Table        = $DomainTable
-            rowKey       = $Object.Domain
-            partitionKey = $Object.Tenant
+            PartitionKey = $Tenant.Tenant
+            RowKey       = $Tenant.Domain
+        }#>
+        #$OldDomain = Get-AzTableRow @MigratePartitionKey
+
+        $Filter = "PartitionKey eq '{0}' and RowKey eq '{1}'" -f $Tenant.Tenant, $Tenant.Domain
+        $OldDomain = Get-AzDataTableEntity @DomainTale -Filter $Filter
+
+        if ($OldDomain) {
+            #$OldDomain | Remove-AzTableRow -Table $DomainTable
+            Remove-AzDataTableEntity @DomainTable -Entity $OldDomain
         }
 
-        $Domain = Get-AzTableRow @ExistingDomain
+        <#$ExistingDomain = @{
+            Table        = $DomainTable
+            rowKey       = $Object.Domain
+            partitionKey = 'TenantDomains'
+        }#>
+        #$Domain = Get-AzTableRow @ExistingDomain
+
+        $Filter = "PartitionKey eq 'TenantDomains' and RowKey eq '{1}'" -f $Tenant.Domain
+        $Domain = Get-AzDataTableEntity @DomainTable -Filter $Filter 
 
         if (!$Domain) {
             Write-Host 'Adding domain from cache file'
-            $DomainObject = @{
+            <#$DomainObject = @{
                 Table        = $DomainTable
                 rowKey       = $Object.Domain
-                partitionKey = $Object.Tenant
+                partitionKey = 'TenantDomains'
                 property     = @{
                     DomainAnalyser = $Result
+                    TenantId       = $Object.Tenant
                     TenantDetails  = ''
                     DkimSelectors  = ''
                     MailProviders  = ''
                 }
+            }#>
+            $DomainObject = @{
+                DomainAnalyser = ''
+                TenantDetails  = $TenantDetails
+                TenantId       = $Tenant.Tenant
+                DkimSelectors  = ''
+                MailProviders  = ''
+                rowKey         = $Tenant.Domain
+                partitionKey   = 'TenantDomains'
             }
-            Add-AzTableRow @DomainObject | Out-Null
+
+            if ($OldDomain) {
+                $DomainObject.DkimSelectors = $OldDomain.DkimSelectors
+                $DomainObject.MailProviders = $OldDomain.MailProviders
+            }
+
+            Add-AzDataTableEntity @DomainTable -Entity $DomainObject | Out-Null
         }
         else {
             Write-Host 'Updating domain from cache file'
             $Domain.DomainAnalyser = $Result
-            $Domain | Update-AzTableRow -Table $DomainTable | Out-Null
+            if ($OldDomain) {
+                $Domain.DkimSelectors = $OldDomain.DkimSelectors
+                $Domain.MailProviders = $OldDomain.MailProviders
+            }
+            Update-AzDataTableEntity @DomainTable -Entity $Domain | Out-Null
         }
         Remove-Item -Path ".\Cache_DomainAnalyser\$($Object.Domain).DomainAnalysis.json" | Out-Null
     }
@@ -55,18 +92,21 @@ if (Test-Path .\Cache_DomainAnalyser) {
 # Need to apply exclusion logic
 $Skiplist = Get-Content 'ExcludedTenants' | ConvertFrom-Csv -Delimiter '|' -Header 'Name', 'User', 'Date'
 
-$DomainList = @{
+<#$DomainList = @{
     Table        = $DomainTable
-    SelectColumn = @('partitionKey', 'DomainAnalyser')
-}
+    SelectColumn = @('partitionKey', 'DomainAnalyser', 'TenantId')
+}#>
 
 if ($Request.Query.tenantFilter -ne 'AllTenants') {
-    $DomainList.partitionKey = $Request.Query.tenantFilter
+    <#$DomainList.columnName = 'TenantId' 
+    $DomainList.operator = 'Equal'
+    $DomainList.value = $Request.Query.tenantFilter#>
+    $DomainTable.Filter = "TenantId eq '{0}'" -f $Request.Query.tenantFilter
 }
 
 try {
     # Extract json from table results
-    $Results = foreach ($DomainAnalyserResult in (Get-AzTableRow @DomainList).DomainAnalyser) {
+    $Results = foreach ($DomainAnalyserResult in (Get-AzDataTableEntity @DomainTable).DomainAnalyser) {
         try { 
             if (![string]::IsNullOrEmpty($DomainAnalyserResult)) {
                 $Object = $DomainAnalyserResult | ConvertFrom-Json

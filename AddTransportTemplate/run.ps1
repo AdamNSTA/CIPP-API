@@ -4,12 +4,11 @@ using namespace System.Net
 param($Request, $TriggerMetadata)
 
 $APIName = $TriggerMetadata.FunctionName
-Log-Request -user $request.headers.'x-ms-client-principal' -API $APINAME  -message "Accessed this API" -Sev "Debug"
+Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME  -message "Accessed this API" -Sev "Debug"
 Write-Host ($request | ConvertTo-Json -Compress)
 
 try {        
     $GUID = (New-Guid).GUID
-    New-Item Config -ItemType Directory -ErrorAction SilentlyContinue
     $JSON = if ($request.body.PowerShellCommand) {
         Write-Host "PowerShellCommand"
         $request.body.PowerShellCommand | ConvertFrom-Json
@@ -20,14 +19,20 @@ try {
             $_ | Select-Object -Property $NonEmptyProperties 
         }
     }
-    $JSON = ($JSON | ConvertTo-Json -Depth 10).tolower()
-    Set-Content "Config\$($GUID).TransportRuleTemplate.json" -Value ($JSON) -Force
-    Log-Request -user $request.headers.'x-ms-client-principal' -API $APINAME  -message "Created Transport Rule Template $($Request.body.name) with GUID $GUID" -Sev "Debug"
+    $JSON = ($JSON | Select-Object @{n = 'name'; e = { $_.name } }, @{n = 'comments'; e = { $_.comments } }, * | ConvertTo-Json -Depth 10)
+    $Table = Get-CippTable -tablename 'templates'
+    $Table.Force = $true
+    Add-AzDataTableEntity @Table -Entity @{
+        JSON         = "$json"
+        RowKey       = "$GUID"
+        PartitionKey = "TransportTemplate"
+    }
+    Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME  -message "Created Transport Rule Template $($Request.body.name) with GUID $GUID" -Sev "Debug"
     $body = [pscustomobject]@{"Results" = "Successfully added template" }
     
 }
 catch {
-    Log-Request -user $request.headers.'x-ms-client-principal'  -API $APINAME -message "Failed to create Transport Rule Template: $($_.Exception.Message)" -Sev "Error"
+    Write-LogMessage -user $request.headers.'x-ms-client-principal'  -API $APINAME -message "Failed to create Transport Rule Template: $($_.Exception.Message)" -Sev "Error"
     $body = [pscustomobject]@{"Results" = "Intune Template Deployment failed: $($_.Exception.Message)" }
 }
 

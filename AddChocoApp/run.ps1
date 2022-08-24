@@ -4,7 +4,7 @@ using namespace System.Net
 param($Request, $TriggerMetadata)
 
 $APIName = $TriggerMetadata.FunctionName
-Log-Request -user $request.headers.'x-ms-client-principal' -API $APINAME  -message "Accessed this API" -Sev "Debug"
+Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME  -message "Accessed this API" -Sev "Debug"
 
 
 Write-Host "PowerShell HTTP trigger function processed a request."
@@ -32,12 +32,18 @@ $Results = foreach ($Tenant in $tenants) {
             assignTo        = $assignTo
             IntuneBody      = $intunebody
         } | ConvertTo-Json -Depth 15
-        $JSONFile = New-Item -Path ".\ChocoApps.Cache\$((New-Guid).GUID)" -Value $CompleteObject -Force -ErrorAction Stop
+        $Table = Get-CippTable -tablename 'apps'
+        $Table.Force = $true
+        Add-AzDataTableEntity @Table -Entity @{
+            JSON         = "$CompleteObject"
+            RowKey       = "$((New-Guid).GUID)"
+            PartitionKey = "apps"
+        }
         "Succesfully added Choco App for $($Tenant) to queue."
-        Log-Request -user $request.headers.'x-ms-client-principal' -API $APINAME -tenant $tenant -message "Chocolatey Application $($intunebody.Displayname) queued to add" -Sev "Info"
+        Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME -tenant $tenant -message "Chocolatey Application $($intunebody.Displayname) queued to add" -Sev "Info"
     }
     catch {
-        Log-Request -user $request.headers.'x-ms-client-principal'  -API $APINAME -tenant $tenant -message "Failed to add Chocolatey Application $($intunebody.Displayname) to queue" -Sev "Error"
+        Write-LogMessage -user $request.headers.'x-ms-client-principal'  -API $APINAME -tenant $tenant -message "Failed to add Chocolatey Application $($intunebody.Displayname) to queue" -Sev "Error"
         "Failed added Choco App for $($Tenant) to queue"
     }
 }
